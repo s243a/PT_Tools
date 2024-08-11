@@ -61,6 +61,7 @@ The Netscape bookmarks file created in Step #2, can be imported into Pearltrees.
 
 ![Tutorial_001_add_button_2729.png](./Tutorial_001_add_button_2729.png)
 3.**c**. **Select the import tab:**
+
   \
 ![Tutorial_001_import_tab_2839.png|300](./Tutorial_001_import_tab_2839.png)
 
@@ -68,9 +69,11 @@ The Netscape bookmarks file created in Step #2, can be imported into Pearltrees.
   \
 ![Tutorial_001_MyBookmarks_button_3612.png|300](./Tutorial_001_MyBookmarks_button_3612.png)
 3.**e**. Click on the square that says, "chrome".
+
   \
 ![Tutorial_001_Chrome_Button_3821.png|300](./Tutorial_001_Chrome_Button_3821.png)
 3.**f**. Select upload.
+
   \
 ![Tutorial_001_BookmarkUpload_Button_4021.png](./Tutorial_001_BookmarkUpload_Button_4021.png)
 
