@@ -32,7 +32,7 @@ Ensure both scripts are in your working directory or Python path before beginnin
 # Step. 1 Scrape the data using, "pt_clip.py"
 
 "pt_clip.py" is a Python script that works by reading URLs from the clipboard, and creating a ".url file" for each URL in the copied data (".url files" are Microsoft Windows shortcut files that contain internet addresses.). The URL files are placed in a subfolder within the favorites folder. For instance, we might want to copy the Categories, within the Wikipedia page (Version Control Systems)
-![[Tutorial_001_wikicats_0425.png]]
+![Tutorial_001_wikicats_0425.png](./Tutorial_001_wikicats_0425.png)
 1.**a**. Highlight the URLs you want to copy on the Wikipedia page, right click and select copy.
 1.**b**. Open a shell w/ both python and pt_clip.py locatable for execution (See the above setup section)
 1.**c**. Run the following command:
@@ -40,7 +40,7 @@ Ensure both scripts are in your working directory or Python path before beginnin
 
 After the above steps, the copied links will appear in the favorites folder:
 
-![[Tutorial_001_shortcut_loc_0810.png]]
+![Tutorial_001_shortcut_loc_0810.png](./Tutorial_001_shortcut_loc_0810.png)
 
 # Step 2. Export the favorites data to a file in Netscape Bookmarks format:
 
@@ -48,7 +48,7 @@ Assuming the data was scraped, via the method in (step #1), the bookmarks can be
 ` python export_favs.py
 
 Currently, the export location is hardcoded , but future versions will base the path on the current user and allow for custom modifications. In this example the Bookmarks file is exported to 2024-08-11_11-11-30.html, as shown below:
-![[Tutorial_001_export_loc_1931.png]]
+![Tutorial_001_export_loc_1931.png](./Tutorial_001_export_loc_1931.png)
 
 
 # Step 3. Import the scraped data into Pearltrees.com
@@ -59,52 +59,52 @@ The Netscape bookmarks file created in Step #2, can be imported into Pearltrees.
 3.**a**. Navigate to the Pearltrees page where you want the bookmarks to be inserted.
 3.**b**. Click the plus button on the Pearltrees user interface.
 
-![[Tutorial_001_add_button_2729.png]]
+![Tutorial_001_add_button_2729.png](./Tutorial_001_add_button_2729.png)
 3.**c**. **Select the import tab:**
 
-![[Tutorial_001_import_tab_2839.png|300]]]]
+![Tutorial_001_import_tab_2839.png|300](./Tutorial_001_import_tab_2839.png)
 
 3.**d**. **Select, "My Bookmarks":**
 
-![[Tutorial_001_MyBookmarks_button_3612.png|300]]
+![Tutorial_001_MyBookmarks_button_3612.png|300](./Tutorial_001_MyBookmarks_button_3612.png)
 3.**e**. Click on the square that says, "chrome".
 
-![[Tutorial_001_Chrome_Button_3821.png|300]]
+![Tutorial_001_Chrome_Button_3821.png|300](./Tutorial_001_Chrome_Button_3821.png)
 3.**f**. Select upload.
 
-![[Tutorial_001_BookmarkUpload_Button_4021.png]]
+![Tutorial_001_BookmarkUpload_Button_4021.png](./Tutorial_001_BookmarkUpload_Button_4021.png)
 3.**g**. Navigate to the folder containing the, "Netscape bookmark file"(e.g 2024-08-11_11-11-30.html), click on it to select and click open. Alternatively, double clicking the file may negate the need to click the open button. 
 
 3.**h.** Now Pearltrees, will open a window to let you choose which items from the selected folder that you want to import. 
 
 3.**i**. Hover the mouse over the folder/s or bookmark/s you want to select for importing and then click the plus sign in the blue circle to select the item to be imported. 
 
-![[Tutorial_001_AddBookmarks_button_20846.png]]
+![Tutorial_001_AddBookmarks_button_20846.png](./Tutorial_001_AddBookmarks_button_20846.png)
 
 3.**j**. You can also navigate inside a folder if you don't want to select the whole folder to be imported by clicking on the arrow, that goes down and then points to the right.
 
-![[Tutorial_001_Navigate_into_BookmarkFolder_23004.png]]
+![Tutorial_001_Navigate_into_BookmarkFolder_23004.png](./Tutorial_001_Navigate_into_BookmarkFolder_23004.png)
 
 3.**k**. Repeat step "j" to select any additional folder or bookmarks you want to import.
 
 3.**l**. Click the "add" button to import them into Pearltrees. 
 
-![[Tutorial_001_add_bookmarks_button_32151.png]]
+![Tutorial_001_add_bookmarks_button_32151.png](./Tutorial_001_add_bookmarks_button_32151.png)
 3.**m**. Move the imported folder to the desired location on the Pearltrees page:
-![[Tutorial_001_Place_Inported_borkmarks_33254.png]]
+![Tutorial_001_Place_Inported_borkmarks_33254.png](./Tutorial_001_Place_Inported_borkmarks_33254.png)
 # 4. Optionally, convert the folder into a section
 
 4.**a**. Click on the folder to navigate inside it:
 4.**b**. Click on the square shaped edit button.
 
-![[Tutorial_001_edit_button_33831.png]]
+![Tutorial_001_edit_button_33831.png](./Tutorial_001_edit_button_33831.png)
 
 Click on the button that says, "Change to section"
 
-![[Tutorial_001_Change_to_section_button_34053.png]]
+![Tutorial_001_Change_to_section_button_34053.png](./Tutorial_001_Change_to_section_button_34053.png)
 
 After deleting any unwanted sections and editing section headings we are left with the final result. 
-![[Tutorial_001_final_result_34211.png]]
+![Tutorial_001_final_result_34211.png](Tutorial_001_final_result_34211.png)
 The page in the above example can be found here:
 https://www.pearltrees.com/s243a/version-control-systems/id10959572 
 
