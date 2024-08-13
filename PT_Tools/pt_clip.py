@@ -32,7 +32,11 @@ now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 # Create a subdirectory with the date and time as the name
 #os.mkdir(now)
-the_path_str=r'C:\Users\johnc\Favorites' + "\\" + now
+username = os.environ.get("USERNAME")
+favorites_path = os.path.join("C:\\Users", username, "Favorites")
+#the_path_str=r'C:\Users\johnc\Favorites' + "\\" + now
+the_path_str=favorites_path + "\\" + now
+
 print("the_path_str="+the_path_str)
 
 the_path=os.path.abspath(the_path_str)
