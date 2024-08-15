@@ -118,7 +118,7 @@ Click on the button that says, "Change to section"
 ![Tutorial_001_Change_to_section_button_34053.png](./001/Tutorial_001_Change_to_section_button_34053.png)
 
 After deleting any unwanted sections and editing section headings we are left with the final result. 
-![Tutorial_001_final_result_34211.png](Tutorial_001_final_result_34211.png)
+![Tutorial_001_final_result_34211.png](./001/Tutorial_001_final_result_34211.png)
   \
 The page in the above example can be found here:
 https://www.pearltrees.com/s243a/version-control-systems/id10959572 
