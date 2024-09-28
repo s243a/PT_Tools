@@ -10,11 +10,16 @@ import argparse
 import logging
 import tempfile
 import os
-from collections.abc import Iterator, Iterable
+from collections.abc import Iterator, Iterable, Mapping, Sequence
 import itertools
-from itertools import islice
+#In one asnwer Claude.AI proposed using zip_longest from ittertools for _strict_value_equal and _value_wise_equal
+from itertools import islice, zip_longest
 import copy
-from collections.abc import MutableSequence, MutableMapping
+from collections.abc import MutableSequence, MutableMapping, Iterable
+from collections import deque
+from enum import Enum
+from typing import Protocol, runtime_checkable
+from abc import ABC, abstractmethod, ABCMeta
 
 VERBOSE = 5
 logging.addLevelName(VERBOSE, "VERBOSE")
@@ -46,6 +51,11 @@ def experimental(func):
         )
         return func(*args, **kwargs)
     return wrapper
+def is_abstract_method(method):
+    return getattr(method, '__isabstractmethod__', False)
+def is_concrete_subclass(a,b): 
+    
+    return issubclass(a, b) and not is_abstract_method(cls.append)
 class SafeListIterator:
     def __init__(self, lst):
         self.list = lst
@@ -103,11 +113,11 @@ class LazySequence:
             #self.iterator = iter(self.underlying)  # Reset iterator for future iterations
             raise
         except IOError:
-            print("An I/O error occurred, in LazySequence.__next__")
+            logging.error("An I/O error occurred, in LazySequence.__next__")
             traceback.print_exc()
             raise
         except ValueError:
-            print("Invalid data encountered, in LazySequence.__next__")
+            logging.error("Invalid data encountered, in LazySequence.__next__")
             traceback.print_exc()
             raise            
         except Exception as e:
@@ -119,8 +129,15 @@ class LazySequence:
     def __repr__(self):
         return f"LazySequence({self.underlying})"
 
+        
+
+class EqualityType(Enum):
+    VALUE_WISE = 1
+    TYPE_AND_VALUE = 2
+    STRICT = 3
+
 # I represents the type of the iterable/container
-# T represents the type of the elements within the iterable        
+# T represents the type of the elements within the iterable
 class Box(Generic[I, T]):
     def __init__(self, 
                  value: I,
@@ -306,9 +323,10 @@ by using assignment rather than append, as append causes infinite loops""",
         #return iter(self.value)
 
     def __repr__(self) -> str:
+        class_name = self.__class__.__name__
         if isinstance(self.value, (Iterator, map)):
-            return f"Box(<lazy>)"
-        return f"Box({self.value})"
+            return f"{class_name}(<lazy>)"
+        return f"{class_name}({self.value}, type={type(self.value).__name__})"
 
 
     def take(self, N: int = 0) -> List[T]:
@@ -621,14 +639,410 @@ by using assignment rather than append, as append causes infinite loops""",
                     yield func(*values)
                 except StopIteration:
                     return  # End the generator when any iterator is exhausted
-
         return Box(zip_generator(), wrap=self.wrap, init=self.init, mutable=self.mutable)
+    def __eq__(self, other):
+        if not isinstance(other, Box):
+            return NotImplemented
+        return self.equals(other,EqualityType.STRICT)
+
+    def equals(self, other, equality_type: EqualityType = EqualityType.VALUE_WISE):
+        if not isinstance(other, Box):
+            return False
+        
+        if equality_type == EqualityType.STRICT:
+            return (type(self) == type(other) and 
+                    self.mutable == other.mutable and 
+                    self._strict_value_equal(self.value, other.value))
+        
+        elif equality_type == EqualityType.TYPE_AND_VALUE:
+            if type(self) != type(other):
+                return False
+            return self.equals(other, EqualityType.VALUE_WISE)
+        
+        elif equality_type == EqualityType.VALUE_WISE:
+            return self._value_wise_equal(self.value, other.value)
+        
+        else:
+            raise ValueError(f"Unsupported equality type: {equality_type}")
+
+        #return Box(zip_generator(), wrap=self.wrap, init=self.init, mutable=self.mutable)
+    def _strict_value_equal(self, val1, val2):
+        if val1 is val2:
+            return True
+        if type(val1) != type(val2):
+            return False
+        if isinstance(val1, Mapping):
+            return (len(val1) == len(val2) and list(val1.items()) == list(val2.items()))
+                    #If instead we didn't care about order we could do this (maybe?, was previusly suggested Claude.AI code):
+                    #all(k in val2 and self._strict_value_equal(v, val2[k]) for k, v in val1.items()))
+        elif isinstance(val1, Sequence) and not isinstance(val1, str):
+            return (len(val1) == len(val2) and
+                    all(self._strict_value_equal(v1, v2) for v1, v2 in zip(val1, val2)))
+        else:
+            return val1 == val2
+
+    def _value_wise_equal(self, val1, val2):
+        if val1 is val2:
+            return True
+        if isinstance(val1, Mapping) and isinstance(val2, Mapping):
+            return (len(val1) == len(val2) and
+                    all(k in val2 and self._value_wise_equal(v, val2[k]) for k, v in val1.items()))
+        elif isinstance(val1, Sequence) and isinstance(val2, Sequence) and not isinstance(val1, str) and not isinstance(val2, str):
+            return (len(val1) == len(val2) and
+                    all(self._value_wise_equal(v1, v2) for v1, v2 in zip(val1, val2)))
+        else:
+            return val1 == val2     
+
+@runtime_checkable
+class Appendable(Protocol):
+    def append(self, item): ...
+
+class AppendableBoxMeta(ABCMeta):
+    def __new__(mcs, name, bases, namespace, **kwargs):
+        cls = super().__new__(mcs, name, bases, namespace, **kwargs)
+        
+        # Check if the class is abstract
+        is_abstract = cls.__abstractmethods__
+        
+        # If it's not abstract, ensure it's a subclass of Box
+        if not is_abstract and not issubclass(cls, Box):
+            raise TypeError(f"{name} must either be abstract or a subclass of Box")
+        
+        return cls
+
+class Abstract_AppendableBox(metaclass=AppendableBoxMeta):
+    @abstractmethod
+    def append(self, item):
+        pass
+
+def ToAppendableBox(cls):
+    #Make this it's own function
+    #def is_abstract_method(method):
+    #    return getattr(method, '__isabstractmethod__', False) 
+           
+    if is_concrete_subclass(cls, Abstract_AppendableBox):
+        print("ToAppendableBox: class already has append method and is not abstract")
+        return cls
+   
+    if hasattr(cls, 'append') and not is_abstract_method(cls.append):
+        logging.debug("ToAppendableBox: has non-abstract method append")
+        if issubclass(cls, Box):
+            # If it's a Box subclass with append, just make it inherit from Abstract_AppendableBox
+            #return type(f"Appendable{cls.__name__}", (cls, Abstract_AppendableBox), {})
+            logging.debug("ToAppendableBox: class has append and already is a subclass of box")
+            class AppendableBoxWrapper(cls, Abstract_AppendableBox,Repr_Wrapper):
+                pass
+            return AppendableBoxWrapper   
+        else:   
+            # For non-Box classes with append, wrap them in a Box
+            logging.debug("ToAppendableBox: class is not a box")  
+            class BoxWrapper(Box,Abstract_AppendableBox):
+                def __init__(self,*args, **kwargs):
+                    if len(args)>0:
+                        maybe_unwrapped=args[0]
+                        args=args[1:]
+
+                    if "box_kwargs" in kwargs:
+                        box_kwargs = kwargs
+                        kwargs.pop("box_kwargs")
+                    else:
+                        box_kwargs={}
+                    if not isinstance(maybe_unwrapped,cls):
+                        wrapped=cls(unwrapped_value, *args, **kwargs)
+                    else:
+                        wrapped=maybe_unwrapped
+                    Box.__init__(self,wrapped,**box_kwargs)
+                    Abstract_AppendableBox.__init__(self)
+                    logging.debug("BoxWrapper.__init__ complete")
+                def append(self, item):
+                    self.value.append(item)
+                def __get_wrapped_attr__(self, name):
+                    return getattr(self.value, name)
+            return BoxWrapper
+    logging.debug("ToAppendableBox: class does not have concrete append method")  
+    # For classes without append      
+    class Repr_Wrapper():
+        @property
+        def __class__(self):
+            return cls
+
+        def __repr__(self):
+            return f"{cls.__name__}({self.value}, type={type(self.value).__name__})" 
+    class AppendableWrapper(): #(cls,Abstract_AppendableBox):
+        def append(self, item):
+            logging.debug(f"AppendableWrapper.append(): self={self}, item={item}")
+            #Should not be Appendable at this point, and if it was uppendable we would have to make sure it isn't abstract
+            if isinstance(self.value, Appendable):
+                self.value.append(item)
+            elif isinstance(self.value, MutableMapping): #More general than dict
+                if isinstance(item, tuple) and len(item) == 2:
+                    self.value[item[0]] = item[1]
+                else:
+                    raise ValueError("Can only append key-value pairs to dictionary-like Boxes")
+            elif isinstance(self.value, MutableSequence): #more general than list
+                self.value.append(item)
+            #Sequence is more general than tupple but leave this commented out since we might want a list of tupples.
+            #elif isinstance(self.value, Sequence) and not isinstance(self.value, (str, bytes)):
+            #    # Convert immutable sequences to mutable ones
+            #    self.value = list(self.value)
+            #    self.value.append(item)
+            else: #ToDo: currently strings and bytes are handled here. Think as to whether this is the best appraoch
+                # For other types, we'll create a list and add both the original value and the new item
+                self.value = [self.value, item]
+
+
+    if issubclass(cls,Abstract_AppendableBox) and not issubclass(cls,Box):
+        logging.debug("ToAppendableBox: class does not subclass box")
+        raise Exception("Not yet implemented. Please subclass Box instead of Abstract_AppendableBox")
+        #class AppendableWrapper_Box(AppendableWrapper,cls,Box,Repr_Wrapper):
+        #    def __init__(self, value=None, **kwargs):
+        #        AppendableWrapper.__init__(self)
+        #        if value is None:
+        #            warnings.warn("AppendableWrapper_Box: no value give, assumming []")
+        #            value=[]
+        #        cls.__init__(self,value, **kwargs)
+        #        Box.__init__(self)
+        #        Repr_Wrapper.__init__(self)
+        #        logger.verbose(f"AppendableWrapper_Box.__init__: self.value = {self.value}")
+        #return AppendableWrapper_Box
+    elif issubclass(cls,Box) and not issubclass(cls,Abstract_AppendableBox):
+        logging.debug(f"ToAppendableBox: class {cls} does not subclass Abstract_AppendableBox")
+        class AppendableWrapper_Abstract(AppendableWrapper,cls,Abstract_AppendableBox,Repr_Wrapper):
+            def __init__(self, *args, **kwargs):
+                cls.__init__(self,*args, **kwargs)
+                AppendableWrapper.__init__(self)
+                Abstract_AppendableBox.__init__(self)
+                Repr_Wrapper.__init__(self)
+                logging.debug(f"AppendableWrapper_Abstract.__init__: self.value = {self.value}")
+        return AppendableWrapper_Abstract
+    else: 
+        logging.debug("ToAppendableBox: class sublcasses both box and Abstract_AppendableBox")
+        class AppendableWrapper_Only(AppendableWrapper,cls):
+            def __init__(self, *args, **kwargs):
+                AppendableWrapper.__init__(self)
+                Box.__init__(self,*args, **kwargs)
+                logging.debug(f"AppendableWrapper_Abstract.__init__: self.value = {self.value}")               
+        return AppendableWrapper_Only
+@ToAppendableBox
+class AppendableBox(Box):
+    pass
+class_cache={}
+def ensure_appendable(warn=False):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if not isinstance(result, Abstract_AppendableBox):
+                if warn:
+                    if not hasattr(result, 'append'):
+                        warnings.warn(f"Output of type {type(result)} does not support the append method. Converting to AppendableBox.")
+                    else:
+                        warnings.warn(f"Output of type {type(result)} has the append method but is not an instance of Abstract_AppendableBox.")
+                result_class = type(result)
+                if result_class not in class_cache:
+                    class_cache[result_class] = ToAppendableBox(result_class)
+                return class_cache[result_class](result.value if isinstance(result, Box) else result)
+            return result
+        return wrapper
+    return decorator
+
+def cLst(*args):
+    return list(args)
+def toBox(*args,**KWs):
+    if len(args)>1:
+        return Box(list(args),**KWs)
+    elif len(args) == 1 and isinstance(args[0], Box):
+        if len(KWs)>0:
+            warnings.warn('Box already created KWs not applied.')
+        return args[0] 
+    elif len(args) == 1 and isinstance(args[0], Iterable):
+        return Box(args[0],**KWs)
+    elif len(args) == 1:
+        return Box([args[0]],**KWs) #ToDo: Maybe create a subclass of box that is a singlton.
+    else:
+        return Box([]) #ToDo: Maybe create a subclass of box that is an empty box.
+def toSingle(aBox):
+    if isinstance(aBox,Box):
+        a_list=aBox.to_list()
+        if len(a_list) == 1:
+            return a_list[0]
+        else:
+            raise ValueError('aBox is not a singlton')
+    else:
+        warnings.warn("input to toSingle(aBox) is not a box")
+        return aBox
+
+#The following decorator makes DequeBox a subclass of Abstract_AppendableBox
+@ToAppendableBox
+class DequeBox(Box):
+    def __init__(self, value=None, **kwargs):
+        super().__init__(deque(value) if value is not None else deque(), **kwargs)
+
+    #For now probably use @ToAppendableBox for testing but later change to the code below
+    #def append(self, item):
+    #    if not self.mutable:
+    #        raise ValueError("Cannot append to immutable Box")
+    #    self.value.append(item)
+
+    def appendleft(self, item):
+        self.value.appendleft(item)
+
+    def pop(self):
+        return self.value.pop()
+
+    def popleft(self):
+        return self.value.popleft()
+
+    def to_string(self):
+        return ''.join(self.value)
+
+    def write_to_file(self, filename):
+        with open(filename, 'w') as f:
+            for item in self.value:
+                f.write(str(item))
+    #def __repr__(self) -> str:
+    #    if isinstance(self.value, (Iterator, map)):
+    #        return f"DequeBox(<lazy>)"
+    #    return f"DequeBox({self.value})"
+
+class BoxFactory:
+    def __init__(
+            self, 
+            factory_types: Dict[str, Union[type, Callable, Dict[str, Any]]],
+            default=Box,
+            error_if_unmatched=False
+        ):
+        self.factory_types = factory_types
+        self.default=default
+        self.error_if_unmatched=error_if_unmatched
+    """
+    Giving:
+        1. A mapping (i.e. factory_types) from underlying types to Box classes
+        2. A default output type (i.e. default)
+        returns a function mapping an underlying type to a new box object (Subtypted based on factory_types),
+        containing that underlying type.
+
+    Args:
+        factory_types: A dictionarly mapping an underlying type to eithert:
+            1. A Mutable Mapping (e.g. dict) containing an underlyign type as the key
+
+    """
+    def __unwrap__(
+            self,
+            v: Union[type, Callable, Dict[str, Any]],
+            *args,
+            **kwrs) -> Tuple[type, tuple, dict]:
+        """
+        Given a mapping from underlying type (e.g. List) to box type either:
+            1. A direct type (should subclass box)
+            2. in dictionary form:
+                {"Class" : myClass, "args" : myInitArgs, kwargs : "my_kwargs"}
+            3. or as an anonymous function -> Tupple(BoxClass, initArgs, initKwars):
+            returns the output class type w/ it's constructure argumetns.
+
+        Args:
+            v: either: Callable -> (BoxClass, initArgs, initKwars) or MutableMapping (e.g. Dict)
+        
+        Returns:
+            Tupple: BoxClass, initArgs, initKwars
+        """
+        if isinstance(v,type):
+            return v,args,kwrs
+        #elif callable(v):
+        #    result = v(*args, **kwrs)
+        #    if isinstance(result, tuple):
+        #        return result
+        #    else:
+        #        return result, args, kwrs
+        #        #return result, (), {}
+        #
+        #Todo: maybe we can also create a class from a string
+        #elif isinstance(v,string)
+        elif hasattr(v, 'get'):
+            if not isinstance(v, MutableMapping):
+                warnings.warn('BoxFactory.__unwrap__: Classes with the "get" attribute should subclass "MutableMapping" (e.g. subclassing "Dict")') 
+            return v["Class"], v.get("args", ()), v.get("kwargs", {})
+        else:
+            raise ValueError(f"Unsupported factory type: {type(v)}")
+    def __call__(self,maybe_box: Any,*args,**kws) -> Box:
+        print(f"maybe_box={str(maybe_box)}, args={str(args)}")
+        if isinstance(maybe_box,Box):
+            return maybe_box
+        
+        for k,v in self.factory_types.items():
+            logging.debug(f"BoxFactory.__cakk__: k={k}, v={v}")
+            try:
+                
+                #logging.debug("self.__unwrap__({str(v)}, {str(*args)}, {str(**kws)})")                
+                if (isinstance(k, type) and isinstance(maybe_box, k)): 
+                    if callable(v):
+                        return v(maybe_box,*args, **kws)
+                    else:
+                        box_class, box_args, box_kwargs = self.__unwrap__(v, *args, **kws)
+                        return box_class(maybe_box,*box_args,**box_kwargs)
+            except (TypeError, ValueError) as e:
+                #logging.debug(f"self.__unwrap__({str(v)}, {str(*args)}, {str(**kws)})")
+                warnings.warn(f"BoxFactory.__call__ failed to create type {box_class.__name__} due to error {type(e).__name__}: {str(e)} attempting fallbacks")
+                continue
+        if self.default is not None: #normally, we want to use Box() by default
+            #Should normally return the main box class (i.e. Box(maybe_value))
+            if self.error_if_unmatched:
+                warnings.warn("BoxFactory.__call__: set default value to None to error when unmatched")
+            return self.default(maybe_box, *args, **kws)
+        else: #Use this branch for testing.
+            if self.error_if_unmatched:
+                raise ValueError(f"No factory method for {type(maybe_box)}")
+            else:
+                warnings.warn("BoxFactory.__call__: set error_if_unmatched == True to true if Box() should not be used by default") 
+                return Box(maybe_box)  
+def type_to_box_factory(
+    factory_types: Dict[str, Union[type, Callable, Dict[str, Any]]] = None,
+    default=Box,
+    error_if_unmatched=False) -> BoxFactory:
+
+    if factory_types is None: 
+        if default is not None:
+            factory_types={
+                deque : DequeBox
+            }
+        else:
+            factory_types = {
+                deque: DequeBox,
+                MutableMapping: Box,
+                MutableSequence: Box,
+                # Add more default mappings as needed
+            }
+    return BoxFactory(factory_types,default,error_if_unmatched)
+def listBox_default_factory(
+    factory_types: Dict[str, Union[type, Callable, Dict[str, Any]]] = None,
+    default_box_type=Box,
+    default_value_type=list,
+    error_if_unmatched=False,
+    warn_on_wrap=True #ToDo review default. Calude.AI suggested False for the default
+):
+    factory = type_to_box_factory(factory_types, default=default_box_type, error_if_unmatched=error_if_unmatched)
+
+    @ensure_appendable(warn=warn_on_wrap)
+    def wrapper(maybe_box=None):
+        if maybe_box is None:
+            return default_box_type(default_value_type())
+        return factory(maybe_box)
+    
+    return wrapper
+
+# Now we can define dequeBox_default_factory
+def dequeBox_default_factory():
+    return listBox_default_factory(
+        factory_types={list: DequeBox},
+        default_box_type=DequeBox,
+        default_value_type=deque
+    )
+
 #################################### Test the function ########################
 def double(x: int) -> int:
     return x * 2
 def test_strict_with_custom_wrap():
     def custom_wrap(collection, item, index):
-        print(f"Custom wrap called with index: {index}, item: {item}")
+        logging.debug(f"Custom wrap called with index: {index}, item: {item}")
         collection.append(item * 2)
 
     lazy_sequence = map(lambda x: x + 1, range(5))
@@ -647,7 +1061,7 @@ box =
 
     
     assert box.value == [2, 4, 6, 8, 10], "strict() didn't apply custom wrap correctly"
-    print("strict() with custom wrap test passed")
+    logger.info("strict() with custom wrap test passed")
 def test_file_stream():
     # Create a temporary file
     with tempfile.NamedTemporaryFile(mode='w+', delete=False) as temp_file:
@@ -719,7 +1133,7 @@ def test():
      "Infinite_stream" : False,
      "Lazy_iterator" : False, 
      "Custom_iterable" : False,
-     "Single_value" : True,
+     "Single_value" : False,
      "Iterable_but_not_iterator" : False,
      "File_stream" : False,
      "Strict_conversion": False,
@@ -728,7 +1142,11 @@ def test():
      "Strict_with_custom_wrap" : False,
      "Test_peek" : False,
      "Split_at" : False,
-     "Zip_with" : False
+     "Zip_with" : False,
+     "Box Equality" : False,
+     "Factory_tests" : False,
+     "List_Box_Factory" : False,
+     "Ensure_Appendable" : True
     }
     
     args = parse_arguments()
@@ -813,7 +1231,7 @@ def test():
                     logging.info("To_dict immutability test passed")
                 elif test_name == "Dictionary_with_custom_wrap":
                     def custom_dict_wrap(d, item, key):
-                        print(f"Custom wrap called with key: {key}, value: {item}")
+                        logger.debug(f"Custom wrap called with key: {key}, value: {item}")
                         d[key] = item
 
                     dict_box = Box({'a': 1, 'b': 2, 'c': 3}, 
@@ -876,8 +1294,7 @@ def test():
                     lazy_box = Box(lazy_integers())
                     logging.info(f"lazy_box = Box(lazy_integers())={lazy_box}")
                     lazy_doubled = lazy_box.map(double)
-                    print("lazy_doubled")
-                    print(lazy_doubled)  # Output: Box(<lazy>)
+                    logger.debug(f"lazy_doubled={lazy_doubled}") # Output: Box(<lazy>) 
                     logger.debug('Take the second 5, via list(islice(lazy_doubled.value, 5))')
                     taken=list(islice(lazy_doubled.value, 5)) # Output: [0, 2, 4, 6, 8]
                     logger.debug(f"taken={taken}")
@@ -1137,15 +1554,179 @@ def test():
                     peeked_diff_len = zipped_diff_len.peek(3)
                     logging.info(f"Zipped different lengths (peeked): {peeked_diff_len}")
                     assert peeked_diff_len == [(1, 1), (2, 2)], "zip_with() with different length boxes incorrect"
+                elif test_name == "Box Equality":
+                    # Test strict equality
+                    assert Box([1, 2, 3]) == Box([1, 2, 3])
+                    assert Box([1, 2, 3]) != Box([1, 2, 3], mutable=True)
+                    assert Box({'a': 1, 'b': 2}) == Box({'a': 1, 'b': 2})
+                    assert Box({'a': 1, 'b': 2}) != Box({'b': 2, 'a': 1})  # Order matters in strict equality
 
-                    print("All zip_with tests passed")
+                    # Test value-wise equality
+                    assert Box([1, 2, 3]).equals(Box([1, 2, 3]), EqualityType.VALUE_WISE)
+                    assert Box([1, 2, 3]).equals(Box([1, 2, 3], mutable=True), EqualityType.VALUE_WISE)
+                    assert Box({'a': 1, 'b': 2}).equals(Box({'b': 2, 'a': 1}), EqualityType.VALUE_WISE)
+
+                    # Test nested structures
+                    assert Box([1, {'a': 2}, 3]) == Box([1, {'a': 2}, 3])
+                    assert Box([1, {'a': 2}, 3]).equals(Box([1, {'a': 2}, 3], mutable=True), EqualityType.VALUE_WISE)
+                    assert not Box([1, {'a': 2}, 3]) == Box([1, {'a': 2, 'b': 3}, 3])                    
+                elif test_name == "Factory_tests":
+                    # Default usage
+                    default_factory = type_to_box_factory()
+                    default_box = default_factory([1, 2, 3])  # Returns a regular Box
+                    assert default_box==Box([1,2,3])
+                    assert default_box.equals(Box([1, 2, 3]), EqualityType.VALUE_WISE)
+                    
+
+                    # Custom factory with DequeBox as default
+                    deque_factory = type_to_box_factory(default=DequeBox)
+                    deque_box = deque_factory([1, 2, 3])  # Returns a DequeBox
+                    assert deque_box == DequeBox([1, 2, 3])
+                    assert deque_box.equals(DequeBox([1, 2, 3]), EqualityType.TYPE_AND_VALUE)
+                    assert not deque_box.equals(Box([1, 2, 3]), EqualityType.TYPE_AND_VALUE)
+
+                    # Factory with error on unmatched types
+                    strict_factory = type_to_box_factory(error_if_unmatched=True)
+                    error_count=0
+                    warn_count=0
+                    try: 
+                        with warnings.catch_warnings(record=True) as w:
+                            strict_box = strict_factory(set([1, 2, 3]))  # Raises a warning and returns a Box
+                            if w:
+                                warn_count=1
+                    except ValueError:
+                        error_count=1
+                        print("Caught expected ValueError")
+                    logging.info(f"error_count == {error_count} and warn_count == {warn_count} and strict_box={strict_box}")
+                    assert error_count == 0 and warn_count == 1 and strict_box == Box({1, 2, 3})
+                    # Custom factory types
+                    custom_factory = type_to_box_factory({
+                        list: DequeBox,
+                        dict: lambda d: Box(d, mutable=False)
+                    })
+                    custom_list_box = custom_factory([1, 2, 3])  # Returns a DequeBox
+                    assert custom_list_box == DequeBox([1, 2, 3])
+                    custom_dict_box = custom_factory({'a': 1, 'b': 2})  # Returns an immutable Box
+                    assert custom_dict_box == Box({'a': 1, 'b': 2},mutable=False)
+                    #print("All zip_with tests passed")
+                elif test_name == "List_Box_Factory":
+                    # Create the factory
+                    list_box_factory = listBox_default_factory()
+
+                    # Use the factory
+                    box1 = list_box_factory([1, 2, 3])  # Creates a Box with [1, 2, 3]
+                    #assert box1 == Box([1,2,3])
+                    logging.info(f"box1.to_list()={box1.to_list()}")
+                    assert box1.to_list() == [1,2,3]
+                    box2 = list_box_factory()  # Creates a Box with an empty list []
+                    #assert box2 == Box([])
+                    assert box2.to_list() == []
+                    box3 = list_box_factory(None)  # Also creates a Box with an empty list []
+                    #assert box3 == Box([])
+                    assert box3.to_list() == []
+
+                    # You can also create a custom factory
+                    custom_list_box_factory = \
+                        listBox_default_factory(
+                            {list: DequeBox, dict: lambda d, *args, **kwargs: Box(d, mutable=False)},
+                            default_box_type=DequeBox,
+                            default_value_type=deque
+                            )
+                    #custom_list_box_factory=dequeBox_default_factory()            
+                    box4 = custom_list_box_factory([1, 2, 3])  # Creates a DequeBox with [1, 2, 3]
+                    logger.info(f"box4={box4}")
+                    logger.info(f"DequeBox={DequeBox([1, 2, 3])}")
+                    assert box4 == DequeBox([1, 2, 3])
+                    box5 = custom_list_box_factory({'a': 1})  # Is box5 mutible or imutable and why?
+                    logging.info(f"box5={box5}, box5.value.")
+                    assert box5.to_dict() == {'a': 1}
+                    box6 = custom_list_box_factory()  # Creates a regular Box with an empty list []
+                    logging.debug(f"box6 type: {type(box6)}")
+                    logging.debug(f"box6 value: {box6.value}")
+                    logging.debug(f"DequeBox([]) type: {type(DequeBox([]))}")
+                    logging.debug(f"DequeBox([]) value: {DequeBox([]).value}")
+                    assert box6 == DequeBox()
+                    # ToDo: suggested tests by Claude.AI
+                    # 1. Test with a non-list, non-dict input (e.g., string):
+                    #    box7 = custom_list_box_factory("string")
+                    #    assert box7 == Box("string")
+                    #
+                    # 2. Test error handling when error_if_unmatched is True:
+                    #    strict_factory = listBox_default_factory(error_if_unmatched=True)
+                    #    # Note: This requires moving to pytest or implementing a custom exception catching mechanism
+                    #    with pytest.raises(ValueError):
+                    #        strict_factory("string")
+                    #
+                    # 3. Test that the mutable property is preserved for the default Box:
+                    #    box8 = list_box_factory([1, 2, 3])
+                    #    assert box8.mutable == Box([1, 2, 3]).mutable
+                    #
+                    # Note: The handling of strings and other non-list, non-dict types needs further consideration.
+                    # Potential approaches for strings could include:
+                    # - Treating them as immutable and not allowing append operations
+                    # - Implementing a custom string class that allows for efficient append operations
+                    # - Converting strings to lists of characters for append operations
+                    # The choice depends on the specific use case and performance requirements.
+                elif test_name == "Ensure_Appendable":
+                    @ensure_appendable()
+                    def create_collection(data):
+                        if isinstance(data, list):
+                            return data  # Will be wrapped in a Box
+                        elif isinstance(data, dict):
+                            return Box(data)  # Already a Box, will be made appendable
+                        else:
+                            return Box(data)  # Generic Box, will be made appendable
+
+                    # Test with list
+                    list_collection = create_collection([1, 2, 3])
+                    assert isinstance(list_collection, Abstract_AppendableBox)
+                    list_collection.append(4)
+                    #The following doesn't work due to type comparison
+                    #assert list_collection == Box([1,2,3,4])
+                    #Claude.AI suggested the following assertion instead:
+                    assert list_collection.to_list() == [1, 2, 3, 4]
+
+                    # Test with dict
+                    dict_collection = create_collection({'a': 1, 'b': 2})
+                    assert isinstance(dict_collection, Abstract_AppendableBox)
+                    dict_collection.append(('c', 3))
+                    #The following doesn't work due to type comparison
+                    #assert dict_collectioB == Box({'a': 1, 'b': 2, 'c': 3})
+                    #Claude.AI suggested the following assertion instead:
+                    logging.info(f"dict_collection.to_dict()={dict_collection.to_dict()}")
+                    assert dict_collection.to_dict() == {'a': 1, 'b': 2, 'c': 3}
+
+                    # Test with custom appendable class
+                    class CustomAppendable:
+                        def __init__(self):
+                            self.data = []
+                        def append(self, item):
+                            self.data.append(item)
+                    custom_collection = create_collection(CustomAppendable())
+                    assert isinstance(custom_collection, Abstract_AppendableBox)
+                    custom_collection.append('item')
+                    logging.info(f"custom_collection after append: {custom_collection.value.data}")
+                    assert custom_collection.value.data == ['item']                
+
+                    # Test with non-appendable type
+                    logging.debug("\nTesting with int:")
+                    int_collection = create_collection(5)
+                    logging.info(f"int_collection after creation: {int_collection}, type: {type(int_collection)}")
+                    assert isinstance(int_collection, Abstract_AppendableBox)
+                    int_collection.append(10)
+                    logging.info(f"int_collection after append: {int_collection.to_list()}")
+                    assert int_collection.to_list() == [5, 10]     
+
+                    print("All Ensure_Appendable tests passed")
+                                   
+                    #ToDo: Additional test/usage pattern proposed by Claude.AI
+                    #custom_collection.append('something')                
+
             except Exception as e:
-                print(f"Error in {test_name} test: {str(e)}")
+                logging.error(f"Error in {test_name} test: {str(e)}")
                 traceback.print_exc()  # This will print the full stack trace
 
-            except Exception as e:
-                print(f"Error in {test_name} test: {str(e)}")
-                traceback.print_exc()  # This will print the full stack trace
+
     print("All enabled Box method tests passed")
 def setup_logging(log_level):
     if log_level == 'NONE':
@@ -1153,8 +1734,33 @@ def setup_logging(log_level):
     elif log_level != 'DEFAULT':
         numeric_level = getattr(logging, log_level.upper(), None)
         if not isinstance(numeric_level, int):
-            raise ValueError(f'Invalid log level: {log_level}')
-        logging.basicConfig(level=numeric_level)
+            if log_level.upper() == 'VERBOSE':
+                numeric_level = VERBOSE
+            else:
+                raise ValueError(f'Invalid log level: {log_level}')
+
+        # Clear any existing handlers
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            handler.close()  # Ensure any open files are closed
+
+        logging.basicConfig(level=numeric_level, format='%(levelname)s: %(message)s')
+        print("log level set")
+
+        #ToDo: give option to specify a log file. Here is the code:
+        ## Add a file handler
+        #file_handler = logging.FileHandler('debug.log')
+        #file_handler.setLevel(numeric_level)
+        #formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        #file_handler.setFormatter(formatter)
+        #logging.getLogger('').addHandler(file_handler) 
+
+        print(f"Log level set to {logging.getLevelName(numeric_level)}")
+        logger.verbose("This is a verbose message")   
+        logging.debug("This is a debug message")
+        logging.info("This is an info message")
+        logging.warning("This is a warning message")
     else:
         # 'DEFAULT' case is handled in the main logic
         pass
@@ -1182,6 +1788,7 @@ if __name__ == "__main__":
         elif args.test_all:
             print("Running all tests")
             test_all=True
+
             #logging.getLogger().setLevel(logging.INFO)
             args.log_level = 'INFO'
         else:
@@ -1190,7 +1797,8 @@ if __name__ == "__main__":
     setup_logging(args.log_level)
     
     if args.test or args.test_all:
-        logging.info("Running tests with log level: %s", args.log_level)
+        #logging.info("Running tests with log level: %s", args.log_level)
+        print("Running tests with log level: %s", args.log_level)
         test()
     else:
         logging.info("Running main program with log level: %s", args.log_level)
