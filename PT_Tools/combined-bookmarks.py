@@ -70,15 +70,21 @@ def setup_directories():
 def sanitize_filename(title):
     """
     Sanitize a title to be used as a filename, following the same encoding as pt_clip.py.
+    Preserves Unicode characters while handling invalid filename characters.
     """
+    # Replace characters that are invalid in filenames
     return (title.replace("http://", "")
                 .replace("https://", "")
                 .replace(":", "%3A")
                 .replace("/", "%2F")
-                .replace("*", "_star_")  # Changed to make it more readable
+                .replace("*", "_star_")
                 .replace('"', "%22")
-                .replace('?', "%3F"))
-                # Not encoding '-' character to avoid conversion issues
+                .replace('?', "%3F")
+                .replace('<', "%3C")
+                .replace('>', "%3E")
+                .replace('|', "%7C")
+                .replace('\\', "%5C"))
+                # Not encoding other Unicode characters to preserve them
 
 
 def decode_filename(encoded_title):
@@ -382,10 +388,17 @@ def save_to_url_files(sections, favorites_path):
             file_name = sanitize_filename(link["title"]) + ".url"
             file_path = os.path.join(main_dir, file_name)
             
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write("[InternetShortcut]\n")
-                f.write(f"URL={link['url']}\n")
-                f.write(f"TITLE={link['title']}\n")
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write("[InternetShortcut]\n")
+                    f.write(f"URL={link['url']}\n")
+                    f.write(f"TITLE={link['title']}\n")
+            except UnicodeEncodeError:
+                # If UTF-8 encoding fails, try with a different encoding that can handle all characters
+                with open(file_path, "w", encoding="utf-8-sig") as f:
+                    f.write("[InternetShortcut]\n")
+                    f.write(f"URL={link['url']}\n")
+                    f.write(f"TITLE={link['title']}\n")
     
     # Process each section
     for section_name, section_data in sections.items():
@@ -416,10 +429,17 @@ def save_to_url_files(sections, favorites_path):
                     file_name = sanitize_filename(link["title"]) + ".url"
                     file_path = os.path.join(section_dir, file_name)
                     
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write("[InternetShortcut]\n")
-                        f.write(f"URL={link['url']}\n")
-                        f.write(f"TITLE={link['title']}\n")
+                    try:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write("[InternetShortcut]\n")
+                            f.write(f"URL={link['url']}\n")
+                            f.write(f"TITLE={link['title']}\n")
+                    except UnicodeEncodeError:
+                        # If UTF-8 encoding fails, try with a different encoding that can handle all characters
+                        with open(file_path, "w", encoding="utf-8-sig") as f:
+                            f.write("[InternetShortcut]\n")
+                            f.write(f"URL={link['url']}\n")
+                            f.write(f"TITLE={link['title']}\n")
         else:
             # Create a subdirectory for this section
             section_dir = os.path.join(main_dir, section_data["title"])
@@ -431,10 +451,17 @@ def save_to_url_files(sections, favorites_path):
                 file_name = sanitize_filename(link["title"]) + ".url"
                 file_path = os.path.join(section_dir, file_name)
                 
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write("[InternetShortcut]\n")
-                    f.write(f"URL={link['url']}\n")
-                    f.write(f"TITLE={link['title']}\n")
+                try:
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write("[InternetShortcut]\n")
+                        f.write(f"URL={link['url']}\n")
+                        f.write(f"TITLE={link['title']}\n")
+                except UnicodeEncodeError:
+                    # If UTF-8 encoding fails, try with a different encoding that can handle all characters
+                    with open(file_path, "w", encoding="utf-8-sig") as f:
+                        f.write("[InternetShortcut]\n")
+                        f.write(f"URL={link['url']}\n")
+                        f.write(f"TITLE={link['title']}\n")
     
     return main_dir, section_directories
 
@@ -460,28 +487,27 @@ def read_url_file_data(file_path):
     url = None
     title = None
     
-    try:
-        with open(file_path, "r", encoding='utf-8', errors='replace') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("URL="):
-                    url = line[4:]
-                elif line.startswith("TITLE=") or line.startswith("Title="):
-                    title = line.split('=', 1)[1]
-    except UnicodeDecodeError:
-        # Fallback to latin-1 if UTF-8 fails
+    # Try multiple encodings in order of preference
+    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+    
+    for encoding in encodings:
         try:
-            with open(file_path, "r", encoding='latin-1') as f:
+            with open(file_path, "r", encoding=encoding) as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("URL="):
                         url = line[4:]
                     elif line.startswith("TITLE=") or line.startswith("Title="):
                         title = line.split('=', 1)[1]
+            # If we got here without exception, break the loop
+            if url or title:
+                break
+        except UnicodeDecodeError:
+            # Try the next encoding
+            continue
         except Exception as e:
-            print(f"Error reading file {file_path}: {e}")
-    except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
+            print(f"Error reading file {file_path} with {encoding} encoding: {e}")
+            break
     
     return url, title
 
@@ -493,7 +519,7 @@ def export_to_netscape_format(directory, output_dir):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_file = os.path.join(output_dir, f"bookmarks-{timestamp}.html")
     
-    with open(output_file, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8-sig") as f:
         # Write header
         f.write("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n")
         f.write("<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n")
