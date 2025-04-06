@@ -7,6 +7,8 @@
 
 import os
 import datetime # for working with dates and times
+import warnings
+import re
 #import win32com.client
 # Create an Internet Explorer application object
 #ie = win32com.client.Dispatch("InternetExplorer.Application")
@@ -15,6 +17,22 @@ global_defaults={
     'ADD_DATE':True,
     'ICON':True
 }
+# TODO: In the future, move this to a utility module with proper deprecation handling
+def deprecated(func):
+    """
+    Decorator to mark functions as deprecated.
+    It will result in a warning being emitted when the function is used.
+    """
+    def wrapper(*args, **kwargs):
+        warnings.warn(
+            f"Function {func.__name__} is deprecated and will be removed in a future version. "
+            f"Use read_url_file_data instead.",
+            category=DeprecationWarning,
+            stacklevel=2
+        )
+        return func(*args, **kwargs)
+    return wrapper
+
 
 # Get the current user name
 username = os.environ.get("USERNAME")
@@ -85,18 +103,22 @@ def get_favicon_str(filename,**kw):
         with temp_ico_file(bmp_file,**kw) as ico_file:
             return get_favicon_icon_str(filename)
 def get_favicon_icon_str(filename):
-    is_custom, icon_path = is_default_icon(co_file)
-    if is_custom:
-        with open(filename, 'rb') as f: # open the file in binary mode
-            data = f.read() # read the file content as bytes
-            b64 = base64.b64encode(data) # encode the bytes to base64
-            b64 = b64.decode('ascii') # decode the base64 bytes to ascii string
-            print(b64) # print the base64 string
-            return filename
+    #is_custom, icon_path = is_default_icon(co_file)
+    is_custom, icon_path = is_default_icon(filename)
+    if is_custom and icon_path:
+        try:
+            with open(icon_path, 'rb') as f:  # open the icon file in binary mode
+                data = f.read()  # read the file content as bytes
+                b64 = base64.b64encode(data)  # encode the bytes to base64
+                b64 = b64.decode('ascii')  # decode the base64 bytes to ascii string
+                return f"data:image/x-icon;base64,{b64}"  # return as data URL
+        except Exception as e:
+            print(f"Error reading icon file {icon_path}: {e}")
+    return None  # return None if not a custom icon or on error
 
 def get_dir_entry_args(dir_entry):   
   output={
-    date:dir_entry.lstat().st_mtime
+    'date':dir_entry.lstat().st_mtime
   }
   return output
 
@@ -106,10 +128,10 @@ def is_default_icon(filename):
     icon = shell.GetIconLocation(filename) # returns a tuple of icon file and index
     if icon[0] == '': # if the icon file is empty, it means the folder item uses the default icon
         #return print('The icon for', filename, 'is the default icon.')
-        return false, ""
+        return False, ""
     else: # otherwise, it means the folder item uses a custom icon
         #print('The icon for', filename, 'is a custom icon.')
-        return true, icon
+        return True, icon
 
 delta_indent="    "
 indent=""
@@ -120,25 +142,148 @@ def increase_indent(indent):
 now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")                
 out_path = os.path.join(out_dir, "bookmarks-" + now + ".html")
 
+@deprecated
 def read_hyperlink_fm_url_file(file_path):
-    with open(file_path, "r") as f:
-        for line in f:
-            if line.startswith("URL="):
-                url = line[4:].strip()
-                return url
+    #with open(file_path, "r") as f:
+    #    for line in f:
+    #        if line.startswith("URL="):
+    #            url = line[4:].strip()
+    #            return url
+    try:
+        # Use latin-1 encoding which can handle any byte value
+        with open(file_path, "r", encoding='latin-1') as f:
+            for line in f:
+                if line.startswith("URL="):
+                    url = line[4:].strip()
+                    return url
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+    return None
+def decode_url_encoded_title(title):
+    """
+    Decode URL-encoded characters in a title based on the specific encoding used.
+    
+    Args:
+        title: The encoded title string (filename)
+    
+    Returns:
+        str: The decoded title suitable for Netscape bookmark format
+    """
+    # Remove the .url extension if present
+    if title.lower().endswith('.url'):
+        title = title[:-4]
+    
+    # Reverse the specific replacements that were made during encoding
+    decoded = (title.replace("%3A", ":")
+                   .replace("%2F", "/")
+                   .replace("_star_", "*")  # Support current custom encoding
+                   .replace("%2A", "*")     # Support standard URL encoding
+                   .replace("%22", '"')
+                   .replace("%3F", "?"))
+        
+    return decoded
+def read_url_file_data(file_path):
+    """
+    Read a .url file and extract both the URL and title if available.
+    
+    Args:
+        file_path: Path to the .url file
+        
+    Returns:
+        tuple: (url, title) where title may be None if not found
+    """
+    url = None
+    title = None
+    
+    try:
+        with open(file_path, "r", encoding='latin-1') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("URL="):
+                    url = line[4:]
+                # Check for various possible title fields
+                elif line.startswith("TITLE=") or line.startswith("Title="):
+                    title = line.split('=', 1)[1]
+                elif line.startswith("BASEURL="):  # Some .url files use this for title
+                    if not title:  # Only use as fallback
+                        title = line.split('=', 1)[1]
+            
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+    
+    return url, title
+
+def escape_html_content(text):
+    """
+    Escape special characters for HTML content while preserving existing entities.
+    
+    This function uses regular expressions to only escape ampersands that aren't
+    already part of valid HTML entities, and also escapes < and > characters.
+    
+    Valid HTML entity patterns that will be preserved:
+    1. Named entities: &name; (e.g., &amp;, &lt;) - limited to 1-8 alpha chars
+    2. Decimal entities: &#number; (e.g., &#38;) - limited to 1-7 digits
+    3. Hex entities: &#xhex; (e.g., &#x26;) - limited to 1-6 hex digits
+    
+    Args:
+        text: Text to escape
+        
+    Returns:
+        str: HTML-escaped text with existing entities preserved
+    """
+    # Replace ampersands that aren't part of valid HTML entities
+    text = re.sub(r'&(?!(#[0-9]{1,7};|#x[0-9a-fA-F]{1,6};|[a-zA-Z]{1,8};))', '&amp;', text)
+    
+    # Escape < and > normally
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    
+    return text
 
 def write_bookmark_url(outfile,dir_entry,**kw):
-    #with outfile as f:
-        f=outfile
-        indent=kw['indent']
-        url=read_hyperlink_fm_url_file(dir_entry)
-        f.write(indent+'<DT><A HREF=\"{}\"'.format(url))
-        for atribute in ['ADD_DATE', 'LAST_MODIFIED', 'ICON']:
-            if atribute in kw:
-                f.write(' {}="{}"'.format(atribute,kw[atribute]))
-        title=dir_entry.name[:-4]        
-        f.write(">{}</A>\n".format(title))
-    # Write the bookmarks as HTML links
+
+    f=outfile
+    indent=kw['indent']
+
+    # Check if it's a .url file
+    if not dir_entry.name.lower().endswith('.url'):
+        return None  # Skip non-URL files
+    
+    # Use dir_entry.path instead of dir_entry directly
+    #url=read_hyperlink_fm_url_file(dir_entry)
+    #url = read_hyperlink_fm_url_file(dir_entry.path)
+    url, file_title = read_url_file_data(dir_entry.path)
+
+    # Check if we got a URL
+    if url is None:
+        print(f"Warning: Could not read URL from {dir_entry.path}")
+        return None
+
+    # Determine the title using the following order:
+    # 1. Title from the .url file if available
+    # 2. Decoded filename if no title in file
+    if file_title:
+        title = file_title  # Use title from file
+    else:
+        # Get the title from filename and decode it
+        raw_title = dir_entry.name[:-4]
+        title = decode_url_encoded_title(raw_title)
+
+    # HTML escape the title (regardless of its source)
+    title = escape_html_content(title)
+    
+    # Safely escape the URL for HTML attributes (quotes matter here)
+    safe_url = url.replace('"', "&quot;")
+
+
+    f.write(indent+f'<DT><A HREF="{safe_url}"')  # Using the safe_url
+    for atribute in ['ADD_DATE', 'LAST_MODIFIED', 'ICON']:
+        if atribute in kw:
+            f.write(' {}="{}"'.format(atribute,kw[atribute]))
+  
+    f.write(">{}</A>\n".format(title))
+    return True
+
 def write_folder_heading(outfile,dir_entry,**kw):
         f=outfile
         indent=kw['indent']

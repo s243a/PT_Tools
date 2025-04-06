@@ -46,8 +46,12 @@ os.mkdir(the_path)
 # Loop through each link
 for link in links:
     # Get the link URL from the href attribute
-    url = link["href"]
-    title=link.text
+    if link.has_attr("href"):
+        url = link["href"]
+        title=link.text
+    else:
+        #TO: Print something here
+        continue
     print("url1="+url)
     print("url1.text="+link.text)
     # Check if the URL is valid
@@ -58,7 +62,7 @@ for link in links:
                           .replace("https://", "")
                           .replace(":","%3A")
                           .replace("/", "%2F")
-                          .replace("*", "_star_")
+                          .replace("*", "%2A")
                           .replace('"',"%22")
                           .replace(':',"%3A")
                           .replace('?',"%3F"))
