@@ -78,6 +78,7 @@ def sanitize_filename(title):
                 .replace("*", "_star_")  # Changed to make it more readable
                 .replace('"', "%22")
                 .replace('?', "%3F"))
+                # Not encoding '-' character to avoid conversion issues
 
 
 def decode_filename(encoded_title):
@@ -111,8 +112,10 @@ def scrape_links_from_url(url, heading_mappings=None):
     
     try:
         # Fetch the webpage content
-        with urllib.request.urlopen(url) as response:
-            html_content = response.read()
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            html_content = response.read().decode('utf-8', errors='replace')
             
         soup = BeautifulSoup(html_content, "html.parser")
         
@@ -458,13 +461,25 @@ def read_url_file_data(file_path):
     title = None
     
     try:
-        with open(file_path, "r", encoding='latin-1') as f:
+        with open(file_path, "r", encoding='utf-8', errors='replace') as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("URL="):
                     url = line[4:]
                 elif line.startswith("TITLE=") or line.startswith("Title="):
                     title = line.split('=', 1)[1]
+    except UnicodeDecodeError:
+        # Fallback to latin-1 if UTF-8 fails
+        try:
+            with open(file_path, "r", encoding='latin-1') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("URL="):
+                        url = line[4:]
+                    elif line.startswith("TITLE=") or line.startswith("Title="):
+                        title = line.split('=', 1)[1]
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
     except Exception as e:
         print(f"Error reading file {file_path}: {e}")
     
