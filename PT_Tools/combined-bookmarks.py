@@ -30,7 +30,7 @@ DEFAULT_HEADING_MAPPINGS = {
     "See also": "See also",
     "Categories": "Super Categories",
     "Subcategories": "Subcategories",
-    "Pages": "Pages"
+    "Pages": "Subtopics"
 }
 
 # Platform detection
@@ -255,6 +255,109 @@ def scrape_links_from_url(url, heading_mappings=None):
         return {"main": {"title": "Error", "links": []}}
 
 
+def split_links_alphabetically(links, max_links_per_group=35):
+    """
+    Split a list of links into alphabetical groups, trying to keep groups
+    between 25-50 items or as evenly distributed as possible.
+    
+    Returns a list of tuples (range_name, links_in_range)
+    """
+    if not links:
+        return []
+    
+    # Sort links alphabetically by title
+    sorted_links = sorted(links, key=lambda x: x["title"].lower())
+    
+    # If fewer than max_links_per_group, return as a single group
+    if len(sorted_links) <= max_links_per_group:
+        return [("", sorted_links)]
+    
+    # Calculate ideal number of groups
+    ideal_group_count = max(2, len(sorted_links) // max_links_per_group)
+    
+    # Get first letter of each title
+    first_letters = [link["title"][0].upper() if link["title"] else "#" for link in sorted_links]
+    unique_letters = sorted(set(first_letters))
+    
+    # If fewer unique letters than ideal groups, use the unique letters
+    if len(unique_letters) <= ideal_group_count:
+        groups = []
+        current_group = []
+        current_letter = None
+        
+        for i, link in enumerate(sorted_links):
+            first_letter = first_letters[i]
+            
+            if first_letter != current_letter:
+                if current_group:
+                    # Determine range name
+                    if len(groups) == 0:
+                        range_name = f"{current_letter}"
+                    else:
+                        prev_group_letter = groups[-1][0]
+                        range_name = f"{prev_group_letter}-{current_letter}"
+                    
+                    groups.append((range_name, current_group))
+                    current_group = []
+                current_letter = first_letter
+            
+            current_group.append(link)
+        
+        # Add the last group
+        if current_group:
+            if len(groups) == 0:
+                range_name = f"{current_letter}"
+            else:
+                prev_group_letter = groups[-1][0]
+                range_name = f"{prev_group_letter}-{current_letter}"
+            
+            groups.append((range_name, current_group))
+        
+        # Merge small groups if needed
+        if len(groups) > 1:
+            i = 0
+            while i < len(groups) - 1:
+                if len(groups[i][1]) < 15 and len(groups[i][1]) + len(groups[i+1][1]) <= max_links_per_group * 1.5:
+                    # Merge groups
+                    merged_links = groups[i][1] + groups[i+1][1]
+                    start_letter = groups[i][0].split("-")[0]
+                    end_letter = groups[i+1][0].split("-")[-1]
+                    merged_name = f"{start_letter}-{end_letter}"
+                    groups[i] = (merged_name, merged_links)
+                    groups.pop(i+1)
+                else:
+                    i += 1
+        
+        return groups
+    
+    # Otherwise, divide links evenly into the ideal number of groups
+    else:
+        links_per_group = len(sorted_links) // ideal_group_count
+        groups = []
+        
+        for i in range(ideal_group_count):
+            start_idx = i * links_per_group
+            end_idx = (i + 1) * links_per_group if i < ideal_group_count - 1 else len(sorted_links)
+            
+            group_links = sorted_links[start_idx:end_idx]
+            
+            if not group_links:
+                continue
+                
+            # Determine range name (first letter of first and last link in group)
+            first_link_letter = group_links[0]["title"][0].upper() if group_links[0]["title"] else "#"
+            last_link_letter = group_links[-1]["title"][0].upper() if group_links[-1]["title"] else "#"
+            
+            if first_link_letter == last_link_letter:
+                range_name = f"{first_link_letter}"
+            else:
+                range_name = f"{first_link_letter}-{last_link_letter}"
+            
+            groups.append((range_name, group_links))
+        
+        return groups
+
+
 def save_to_url_files(sections, favorites_path):
     """
     Save the scraped sections and links to .url files in the favorites directory.
@@ -286,20 +389,49 @@ def save_to_url_files(sections, favorites_path):
         if section_name == "main":
             continue
         
-        # Create a subdirectory for this section
-        section_dir = os.path.join(main_dir, section_data["title"])
-        os.makedirs(section_dir, exist_ok=True)
-        section_directories[section_name] = section_dir
+        links = section_data["links"]
+        section_title = section_data["title"]
         
-        # Save each link in this section
-        for link in section_data["links"]:
-            file_name = sanitize_filename(link["title"]) + ".url"
-            file_path = os.path.join(section_dir, file_name)
+        # If section has more than 35 links, split it alphabetically
+        if len(links) > 35:
+            alphabetical_groups = split_links_alphabetically(links)
             
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write("[InternetShortcut]\n")
-                f.write(f"URL={link['url']}\n")
-                f.write(f"TITLE={link['title']}\n")
+            for group_range, group_links in alphabetical_groups:
+                # Create subdirectory name based on the alphabetical range
+                if group_range:
+                    subsection_title = f"{section_title} ({group_range})"
+                else:
+                    subsection_title = section_title
+                
+                # Create a subdirectory for this alphabetical group
+                section_dir = os.path.join(main_dir, subsection_title)
+                os.makedirs(section_dir, exist_ok=True)
+                section_directories.setdefault(section_name, []).append(section_dir)
+                
+                # Save each link in this group
+                for link in group_links:
+                    file_name = sanitize_filename(link["title"]) + ".url"
+                    file_path = os.path.join(section_dir, file_name)
+                    
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write("[InternetShortcut]\n")
+                        f.write(f"URL={link['url']}\n")
+                        f.write(f"TITLE={link['title']}\n")
+        else:
+            # Create a subdirectory for this section
+            section_dir = os.path.join(main_dir, section_data["title"])
+            os.makedirs(section_dir, exist_ok=True)
+            section_directories[section_name] = section_dir
+            
+            # Save each link in this section
+            for link in section_data["links"]:
+                file_name = sanitize_filename(link["title"]) + ".url"
+                file_path = os.path.join(section_dir, file_name)
+                
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write("[InternetShortcut]\n")
+                    f.write(f"URL={link['url']}\n")
+                    f.write(f"TITLE={link['title']}\n")
     
     return main_dir, section_directories
 
@@ -379,9 +511,28 @@ def export_to_netscape_format(directory, output_dir):
                 
                 f.write(f'    <DT><A HREF="{safe_url}" ADD_DATE="{int(datetime.datetime.now().timestamp())}">{title}</A>\n')
         
-        # Process subdirectories
+        # Process subdirectories - organize by section groups
+        # First, collect all subdirectories and group by section type
+        section_groups = {}
         for item in os.scandir(directory):
             if item.is_dir():
+                folder_name = item.name
+                # Extract section name without the alphabetical range
+                if "(" in folder_name and ")" in folder_name:
+                    section_base = folder_name.split("(")[0].strip()
+                    if section_base not in section_groups:
+                        section_groups[section_base] = []
+                    section_groups[section_base].append(item)
+                else:
+                    if folder_name not in section_groups:
+                        section_groups[folder_name] = []
+                    section_groups[folder_name].append(item)
+        
+        # Now process each section group
+        for section_name, section_items in section_groups.items():
+            # If there's only one directory in this section, don't create an extra level
+            if len(section_items) == 1 and "(" not in section_items[0].name:
+                item = section_items[0]
                 folder_name = item.name
                 f.write(f'    <DT><H3 FOLDED ADD_DATE="{int(datetime.datetime.now().timestamp())}">{folder_name}</H3>\n')
                 f.write("    <DL><p>\n")
@@ -405,6 +556,50 @@ def export_to_netscape_format(directory, output_dir):
                         safe_url = url.replace('"', "&quot;")
                         
                         f.write(f'      <DT><A HREF="{safe_url}" ADD_DATE="{int(datetime.datetime.now().timestamp())}">{title}</A>\n')
+                
+                f.write("    </DL><p>\n")
+            else:
+                # For sections with multiple alphabetical ranges, create a parent folder
+                f.write(f'    <DT><H3 FOLDED ADD_DATE="{int(datetime.datetime.now().timestamp())}">{section_name}</H3>\n')
+                f.write("    <DL><p>\n")
+                
+                # Sort the subdirectories by their alphabetical range
+                sorted_items = sorted(section_items, key=lambda x: x.name)
+                
+                for item in sorted_items:
+                    folder_name = item.name
+                    # If the folder has an alphabetical range, extract just the range part
+                    if "(" in folder_name and ")" in folder_name:
+                        range_part = folder_name[folder_name.index("("):].strip()
+                        f.write(f'      <DT><H3 FOLDED ADD_DATE="{int(datetime.datetime.now().timestamp())}">{range_part}</H3>\n')
+                    else:
+                        # Shouldn't get here for multiple directories of the same section type
+                        # but just in case, use the full folder name
+                        f.write(f'      <DT><H3 FOLDED ADD_DATE="{int(datetime.datetime.now().timestamp())}">{folder_name}</H3>\n')
+                    
+                    f.write("      <DL><p>\n")
+                    
+                    # Process files in this subdirectory
+                    for subitem in os.scandir(item.path):
+                        if subitem.is_file() and subitem.name.lower().endswith('.url'):
+                            url, file_title = read_url_file_data(subitem.path)
+                            
+                            if url is None:
+                                continue
+                            
+                            # Get title from file or filename
+                            if file_title:
+                                title = file_title
+                            else:
+                                raw_title = subitem.name[:-4]  # Remove .url extension
+                                title = decode_filename(raw_title)
+                            
+                            title = escape_html_content(title)
+                            safe_url = url.replace('"', "&quot;")
+                            
+                            f.write(f'        <DT><A HREF="{safe_url}" ADD_DATE="{int(datetime.datetime.now().timestamp())}">{title}</A>\n')
+                    
+                    f.write("      </DL><p>\n")
                 
                 f.write("    </DL><p>\n")
         
