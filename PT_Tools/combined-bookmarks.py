@@ -106,10 +106,42 @@ def decode_filename(encoded_title):
     return decoded
 
 
-def scrape_links_from_url(url, heading_mappings=None):
+# Canonical section tokens accepted by --sections, mapped from the
+# sections dict keys / heading-mapping keys.
+SECTION_TOKENS = {"main", "see_also", "categories", "subcategories", "pages", "links"}
+
+
+def parse_sections_arg(text):
+    """Parse a --sections value into canonical tokens, or None (= all)."""
+    if text is None:
+        return None
+    aliases = {
+        "main": "main",
+        "see-also": "see_also", "see also": "see_also", "see_also": "see_also",
+        "categories": "categories", "category": "categories",
+        "subcategories": "subcategories", "subcategory": "subcategories",
+        "pages": "pages", "subtopics": "pages",
+        "links": "links",
+    }
+    wanted = set()
+    for raw in text.split(","):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token in aliases:
+            wanted.add(aliases[token])
+        else:
+            print(f"Warning: unknown section '{raw.strip()}' ignored. "
+                  f"Valid sections: main, see-also, categories, subcategories, pages")
+    return wanted
+
+
+def scrape_links_from_url(url, heading_mappings=None, wanted_sections=None):
     """
     Scrape links from a given URL, organizing them based on section headings.
     Returns a dictionary of sections and their links.
+    If wanted_sections is a set of canonical tokens (see SECTION_TOKENS),
+    only those sections are kept.
     """
     if heading_mappings is None:
         heading_mappings = DEFAULT_HEADING_MAPPINGS
@@ -137,31 +169,50 @@ def scrape_links_from_url(url, heading_mappings=None):
         # Process Wikipedia-specific sections if the URL is from Wikipedia
         if "wikipedia.org" in url:
             # Look for "See also" section
+            # Markup note (patched 2026-11-08): article pages are now served
+            # as Parsoid HTML, where the section id sits on the <h2> itself
+            # (inside <div class="mw-heading">, grouped in a <section>),
+            # content links use ABSOLUTE hrefs, and redirect links carry
+            # class="mw-redirect". The original code looked for a parent <h2>
+            # of a span, relative hrefs only, and rejected any link with a
+            # class attribute, so it silently captured nothing. Handle both
+            # the Parsoid and the legacy markup.
             see_also_heading = soup.find(id="See_also") or soup.find(string="See also")
             if see_also_heading:
-                see_also_section = see_also_heading.find_parent("h2")
-                if see_also_section:
-                    see_also_links = []
-                    current = see_also_section.next_sibling
-                    while current and not (current.name == "h2"):
-                        if current.name == "ul":
-                            for li in current.find_all("li"):
-                                a_tag = li.find("a")
-                                if a_tag and a_tag.has_attr("href") and not a_tag.has_attr("class"):
-                                    href = a_tag["href"]
-                                    if href.startswith("/wiki/") and ":" not in href:
-                                        full_url = "https://en.wikipedia.org" + href
-                                        see_also_links.append({
-                                            "url": full_url,
-                                            "title": a_tag.text
-                                        })
-                        current = current.next_sibling
-                    
-                    if see_also_links:
-                        sections[heading_mappings["See also"]] = {
-                            "title": heading_mappings["See also"],
-                            "links": see_also_links
-                        }
+                h2 = see_also_heading if see_also_heading.name == "h2" else see_also_heading.find_parent("h2")
+                see_also_links = []
+                if h2 is not None:
+                    section = h2.find_parent("section")
+                    if section is not None:
+                        uls = section.find_all("ul")
+                    else:
+                        # Legacy markup: walk siblings of the heading (or of
+                        # its wrapping div) until the next <h2> heading.
+                        container = h2.find_parent("div", class_="mw-heading") or h2
+                        uls = []
+                        current = container.next_sibling
+                        while current is not None and getattr(current, "name", None) != "h2":
+                            if getattr(current, "name", None) == "ul":
+                                uls.append(current)
+                            current = current.next_sibling
+                    for ul in uls:
+                        for li in ul.find_all("li"):
+                            a_tag = li.find("a")
+                            if a_tag is None or not a_tag.has_attr("href"):
+                                continue
+                            href = a_tag["href"]
+                            if href.startswith("https://en.wikipedia.org/wiki/"):
+                                href = href[len("https://en.wikipedia.org"):]
+                            if href.startswith("/wiki/") and ":" not in href:
+                                see_also_links.append({
+                                    "url": "https://en.wikipedia.org" + href,
+                                    "title": a_tag.text
+                                })
+                if see_also_links:
+                    sections[heading_mappings["See also"]] = {
+                        "title": heading_mappings["See also"],
+                        "links": see_also_links
+                    }
             
             # Process categories
             categories_div = soup.find(id="mw-normal-catlinks")
@@ -257,8 +308,19 @@ def scrape_links_from_url(url, heading_mappings=None):
                     "links": all_links
                 }
         
+        # Apply the --sections filter, if any. Section keys here are the
+        # mapped folder names, so invert the active heading mappings to get
+        # each section's canonical token.
+        if wanted_sections is not None:
+            canonical = {"main": "main", "Links": "links"}
+            for key, token in (("See also", "see_also"), ("Categories", "categories"),
+                               ("Subcategories", "subcategories"), ("Pages", "pages")):
+                canonical[heading_mappings[key]] = token
+            sections = {name: data for name, data in sections.items()
+                        if canonical.get(name) in wanted_sections}
+
         return sections
-    
+
     except Exception as e:
         print(f"Error scraping links from {url}: {e}")
         return {"main": {"title": "Error", "links": []}}
@@ -656,6 +718,7 @@ def main():
     parser.add_argument("--favorites-dir", help="Directory to store .url files", default=DEFAULT_FAVORITES_PATH)
     parser.add_argument("--output-dir", help="Directory to save output bookmark file", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--mapping", help="Custom heading mapping in format 'original:mapped,original2:mapped2'")
+    parser.add_argument("--sections", help="Comma-separated list of sections to capture: main, see-also, categories, subcategories, pages (default: all)")
     args = parser.parse_args()
     
     # Set up directories
@@ -675,8 +738,14 @@ def main():
         except:
             print("Warning: Could not parse custom mapping. Using defaults.")
     
+    wanted_sections = parse_sections_arg(args.sections)
+    if args.sections is not None and not wanted_sections:
+        print("Error: --sections did not contain any valid section name. Nothing to do.")
+        sys.exit(2)
+
     print(f"Scraping links from {args.url}...")
-    sections = scrape_links_from_url(args.url, heading_mappings)
+    sections = scrape_links_from_url(args.url, heading_mappings, wanted_sections)
+    print(f"Sections captured: {', '.join(sections.keys()) if sections else '(none)'}")
     
     print(f"Saving links to .url files in {favorites_path}...")
     main_dir, section_dirs = save_to_url_files(sections, favorites_path)
