@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import datetime
+import difflib
 import argparse
 import platform
 import urllib.request
@@ -106,42 +107,81 @@ def decode_filename(encoded_title):
     return decoded
 
 
-# Canonical section tokens accepted by --sections, mapped from the
-# sections dict keys / heading-mapping keys.
-SECTION_TOKENS = {"main", "see_also", "categories", "subcategories", "pages", "links"}
+# --sections matching. A section can be selected three ways:
+#   exact  - a plain token: a canonical name (main, see-also, categories,
+#            subcategories, pages) or a section's display/folder name
+#            (e.g. "Super Categories"), case-insensitive.
+#   regex  - a token "re:<pattern>": case-insensitive regex search over the
+#            section's names. (Patterns cannot contain commas - the list
+#            separator; use \\x2c for a literal comma.)
+#   fuzzy  - a token "fuzzy:<text>": the section is selected if any of its
+#            names has a difflib similarity ratio >= FUZZY_THRESHOLD.
+# Semantic (embedding) matching is a documented future TODO, not built.
+SECTION_ALIASES = {
+    "main": "main",
+    "see-also": "see_also", "see also": "see_also", "see_also": "see_also",
+    "categories": "categories", "category": "categories",
+    "subcategories": "subcategories", "subcategory": "subcategories",
+    "pages": "pages", "subtopics": "pages",
+    "links": "links",
+}
+SECTION_KNOWN_NAMES = set(SECTION_ALIASES) | {"super categories"}
+FUZZY_THRESHOLD = 0.8
 
 
 def parse_sections_arg(text):
-    """Parse a --sections value into canonical tokens, or None (= all)."""
+    """Parse a --sections value into (kind, value) matchers, or None (= all)."""
     if text is None:
         return None
-    aliases = {
-        "main": "main",
-        "see-also": "see_also", "see also": "see_also", "see_also": "see_also",
-        "categories": "categories", "category": "categories",
-        "subcategories": "subcategories", "subcategory": "subcategories",
-        "pages": "pages", "subtopics": "pages",
-        "links": "links",
-    }
-    wanted = set()
+    matchers = []
     for raw in text.split(","):
-        token = raw.strip().lower()
+        token = raw.strip()
         if not token:
             continue
-        if token in aliases:
-            wanted.add(aliases[token])
+        low = token.lower()
+        if low.startswith("re:"):
+            pattern = token[3:]
+            try:
+                matchers.append(("regex", re.compile(pattern, re.IGNORECASE)))
+            except re.error as e:
+                raise ValueError(f"invalid regex in --sections: {pattern!r}: {e}")
+        elif low.startswith("fuzzy:"):
+            matchers.append(("fuzzy", low[len("fuzzy:"):].strip()))
         else:
-            print(f"Warning: unknown section '{raw.strip()}' ignored. "
-                  f"Valid sections: main, see-also, categories, subcategories, pages")
-    return wanted
+            if low not in SECTION_KNOWN_NAMES:
+                print(f"Warning: unknown section '{token}' ignored. Valid sections: "
+                      f"main, see-also, categories, subcategories, pages; "
+                      f"or re:<regex> / fuzzy:<text>")
+            else:
+                matchers.append(("exact", low))
+    return matchers
 
 
-def scrape_links_from_url(url, heading_mappings=None, wanted_sections=None):
+def section_selected(canonical_token, names, matchers):
+    """True if any matcher selects the section with these names."""
+    if matchers is None:
+        return True
+    lowered = [n.lower() for n in names]
+    for kind, value in matchers:
+        if kind == "exact":
+            if SECTION_ALIASES.get(value) == canonical_token or value in lowered:
+                return True
+        elif kind == "regex":
+            if any(value.search(n) for n in names):
+                return True
+        elif kind == "fuzzy":
+            if any(difflib.SequenceMatcher(None, value, n).ratio() >= FUZZY_THRESHOLD
+                   for n in lowered):
+                return True
+    return False
+
+
+def scrape_links_from_url(url, heading_mappings=None, section_matchers=None):
     """
     Scrape links from a given URL, organizing them based on section headings.
     Returns a dictionary of sections and their links.
-    If wanted_sections is a set of canonical tokens (see SECTION_TOKENS),
-    only those sections are kept.
+    If section_matchers is given (see parse_sections_arg), only the sections
+    it selects are kept.
     """
     if heading_mappings is None:
         heading_mappings = DEFAULT_HEADING_MAPPINGS
@@ -310,14 +350,19 @@ def scrape_links_from_url(url, heading_mappings=None, wanted_sections=None):
         
         # Apply the --sections filter, if any. Section keys here are the
         # mapped folder names, so invert the active heading mappings to get
-        # each section's canonical token.
-        if wanted_sections is not None:
+        # each section's canonical token and full name list for matching.
+        if section_matchers is not None:
             canonical = {"main": "main", "Links": "links"}
+            name_lists = {"main": ["main"], "Links": ["links"]}
             for key, token in (("See also", "see_also"), ("Categories", "categories"),
                                ("Subcategories", "subcategories"), ("Pages", "pages")):
                 canonical[heading_mappings[key]] = token
+                name_lists[heading_mappings[key]] = [token, token.replace("_", " "),
+                                                     key, heading_mappings[key]]
             sections = {name: data for name, data in sections.items()
-                        if canonical.get(name) in wanted_sections}
+                        if section_selected(canonical.get(name),
+                                            name_lists.get(name, [name]),
+                                            section_matchers)}
 
         return sections
 
@@ -718,7 +763,7 @@ def main():
     parser.add_argument("--favorites-dir", help="Directory to store .url files", default=DEFAULT_FAVORITES_PATH)
     parser.add_argument("--output-dir", help="Directory to save output bookmark file", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--mapping", help="Custom heading mapping in format 'original:mapped,original2:mapped2'")
-    parser.add_argument("--sections", help="Comma-separated list of sections to capture: main, see-also, categories, subcategories, pages (default: all)")
+    parser.add_argument("--sections", help="Comma-separated section selectors: plain names (main, see-also, categories, subcategories, pages), re:<regex>, or fuzzy:<text> (default: all)")
     args = parser.parse_args()
     
     # Set up directories
@@ -738,13 +783,17 @@ def main():
         except:
             print("Warning: Could not parse custom mapping. Using defaults.")
     
-    wanted_sections = parse_sections_arg(args.sections)
-    if args.sections is not None and not wanted_sections:
-        print("Error: --sections did not contain any valid section name. Nothing to do.")
+    try:
+        section_matchers = parse_sections_arg(args.sections)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(2)
+    if args.sections is not None and not section_matchers:
+        print("Error: --sections did not contain any valid section selector. Nothing to do.")
         sys.exit(2)
 
     print(f"Scraping links from {args.url}...")
-    sections = scrape_links_from_url(args.url, heading_mappings, wanted_sections)
+    sections = scrape_links_from_url(args.url, heading_mappings, section_matchers)
     print(f"Sections captured: {', '.join(sections.keys()) if sections else '(none)'}")
     
     print(f"Saving links to .url files in {favorites_path}...")
