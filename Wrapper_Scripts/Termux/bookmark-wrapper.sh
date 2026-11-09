@@ -5,9 +5,10 @@
 
 # Check if a URL was provided
 if [ $# -lt 1 ]; then
-  echo "Usage: $0 <url> [custom_mapping]"
+  echo "Usage: $0 <url> [custom_mapping] [sections]"
   echo "Example: $0 https://en.wikipedia.org/wiki/Python_(programming_language)"
   echo "Example with custom mapping: $0 https://en.wikipedia.org/wiki/Python_(programming_language) \"See also:Related,Categories:Topics\""
+  echo "Example with sections only (empty mapping): $0 https://en.wikipedia.org/wiki/Python_(programming_language) \"\" \"see-also,categories\""
   exit 1
 fi
 
@@ -45,13 +46,16 @@ TEMP_SUBDIR="${TEMP_DIR}/${TIMESTAMP}"
 mkdir -p "$TEMP_SUBDIR"
 
 # Run the Python script with the specified temp directory and output directory
-if [ $# -gt 1 ]; then
+EXTRA_ARGS=()
+if [ -n "$2" ]; then
   # Custom mapping was provided
-  python "$PYTHON_SCRIPT" "$URL" --favorites-dir "$TEMP_SUBDIR" --output-dir "$OUTPUT_DIR" --mapping "$2"
-else
-  # No custom mapping
-  python "$PYTHON_SCRIPT" "$URL" --favorites-dir "$TEMP_SUBDIR" --output-dir "$OUTPUT_DIR"
+  EXTRA_ARGS+=(--mapping "$2")
 fi
+if [ -n "$3" ]; then
+  # Section filter was provided
+  EXTRA_ARGS+=(--sections "$3")
+fi
+python "$PYTHON_SCRIPT" "$URL" --favorites-dir "$TEMP_SUBDIR" --output-dir "$OUTPUT_DIR" "${EXTRA_ARGS[@]}"
 
 # Check if the Python script was successful
 if [ $? -ne 0 ]; then
