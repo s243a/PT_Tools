@@ -17,11 +17,13 @@ import os
 import re
 import sys
 import datetime
+import difflib
 import argparse
 import platform
 import urllib.request
 import urllib.parse
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from pathlib import Path
 import html
 
@@ -106,10 +108,233 @@ def decode_filename(encoded_title):
     return decoded
 
 
+# --sections matching. A section can be selected three ways:
+#   exact  - a plain token: a canonical name (main, see-also, categories,
+#            subcategories, pages), a source heading ("See also"), or a
+#            section's folder name under the ACTIVE --mapping (e.g. "Super
+#            Categories" by default), case-insensitive.
+#   regex  - a token "re:<pattern>": case-insensitive regex search over the
+#            section's names. (Patterns cannot contain commas - the list
+#            separator; use \\x2c for a literal comma.)
+#   fuzzy  - a token "fuzzy:<text>": the section is selected if any of its
+#            names has a difflib similarity ratio >= FUZZY_THRESHOLD.
+# Semantic (embedding) matching is a documented future TODO, not built.
+SECTION_ALIASES = {
+    "main": "main",
+    "see-also": "see_also", "see also": "see_also", "see_also": "see_also",
+    "categories": "categories", "category": "categories",
+    "subcategories": "subcategories", "subcategory": "subcategories",
+    "pages": "pages", "subtopics": "pages",
+    "links": "links",
+}
+# (source heading key in the mappings, canonical token) for mappable sections.
+CANONICAL_SECTIONS = (("See also", "see_also"), ("Categories", "categories"),
+                      ("Subcategories", "subcategories"), ("Pages", "pages"))
+# Folder names a --mapping may not use: "main" is the page itself and is
+# written to the root folder, so a section mapped onto it would be lost.
+RESERVED_FOLDER_NAMES = {"main"}
+FUZZY_THRESHOLD = 0.8
+
+
+def known_section_names(heading_mappings):
+    """Plain --sections tokens valid under the active heading mappings."""
+    names = set(SECTION_ALIASES)
+    for key, _ in CANONICAL_SECTIONS:
+        names.add(key.lower())
+        names.add(heading_mappings[key].lower())
+    return names
+
+
+def check_mapping_collisions(heading_mappings):
+    """
+    Return (errors, warnings) for mapped folder names that clash.
+    Two headings mapped to one folder are merged into it (warning); a heading
+    mapped onto a reserved name is an error.
+    """
+    errors, warnings = [], []
+    by_folder = {}
+    for key, _ in CANONICAL_SECTIONS:
+        folder = heading_mappings[key]
+        if folder.lower() in RESERVED_FOLDER_NAMES:
+            errors.append(f"--mapping sends '{key}' to the reserved name '{folder}'.")
+        by_folder.setdefault(folder.lower(), []).append(key)
+    for folder, keys in by_folder.items():
+        if len(keys) > 1:
+            warnings.append(f"--mapping sends {', '.join(repr(k) for k in keys)} "
+                            f"to the same folder '{heading_mappings[keys[0]]}'; "
+                            f"their links will be merged into that one folder.")
+    return errors, warnings
+
+
+def parse_sections_arg(text, heading_mappings=None):
+    """Parse a --sections value into (kind, value) matchers, or None (= all)."""
+    if text is None:
+        return None
+    if heading_mappings is None:
+        heading_mappings = DEFAULT_HEADING_MAPPINGS
+    known = known_section_names(heading_mappings)
+    matchers = []
+    for raw in text.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        low = token.lower()
+        if low.startswith("re:"):
+            pattern = token[3:]
+            try:
+                matchers.append(("regex", re.compile(pattern, re.IGNORECASE)))
+            except re.error as e:
+                raise ValueError(f"invalid regex in --sections: {pattern!r}: {e}")
+        elif low.startswith("fuzzy:"):
+            fuzzy_text = low[len("fuzzy:"):].strip()
+            if not fuzzy_text:
+                raise ValueError("empty fuzzy: selector in --sections")
+            matchers.append(("fuzzy", fuzzy_text))
+        else:
+            if low not in known:
+                folders = ", ".join(heading_mappings[k] for k, _ in CANONICAL_SECTIONS)
+                print(f"Warning: unknown section '{token}' ignored. Valid sections: "
+                      f"main, see-also, categories, subcategories, pages, "
+                      f"or a folder name ({folders}); "
+                      f"or re:<regex> / fuzzy:<text>")
+            else:
+                matchers.append(("exact", low))
+    return matchers
+
+
+def section_selected(canonical_tokens, names, matchers):
+    """True if any matcher selects the section with these tokens/names."""
+    if matchers is None:
+        return True
+    lowered = [n.lower() for n in names]
+    for kind, value in matchers:
+        if kind == "exact":
+            if SECTION_ALIASES.get(value) in canonical_tokens or value in lowered:
+                return True
+        elif kind == "regex":
+            if any(value.search(n) for n in names):
+                return True
+        elif kind == "fuzzy":
+            if any(difflib.SequenceMatcher(None, value, n).ratio() >= FUZZY_THRESHOLD
+                   for n in lowered):
+                return True
+    return False
+
+
+def filter_sections(sections, heading_mappings, matchers):
+    """
+    Keep only the sections the --sections matchers select. Section keys are
+    the mapped folder names, so invert the active heading mappings to get
+    each folder's canonical token(s) and full name list. A folder that
+    several headings were mapped onto carries all of their tokens.
+    """
+    if matchers is None:
+        return sections
+    tokens = {"main": {"main"}, "Links": {"links"}}
+    names = {"main": ["main"], "Links": ["links"]}
+    for key, token in CANONICAL_SECTIONS:
+        folder = heading_mappings[key]
+        tokens.setdefault(folder, set()).add(token)
+        names.setdefault(folder, [folder]).extend([token, token.replace("_", " "), key])
+    return {name: data for name, data in sections.items()
+            if section_selected(tokens.get(name, set()), names.get(name, [name]), matchers)}
+
+
+def resolve_wiki_link(href, page_url):
+    """
+    Resolve an href found on a wiki page against that page's own URL.
+    Handles site-relative ('/wiki/X'), Parsoid-relative ('./X'),
+    protocol-relative ('//host/wiki/X') and absolute hrefs. Returns
+    (url, title) for a /wiki/ link on the page's own wiki (desktop and
+    mobile hosts count as the same wiki, and the URL returned always uses
+    the desktop host), or None. title is the decoded page title, e.g.
+    'Category:Foo'. The query string is dropped.
+    """
+    if not href or href.startswith("#"):
+        return None
+    parts = urllib.parse.urlsplit(urllib.parse.urljoin(page_url, href))
+    if parts.scheme not in ("http", "https"):
+        return None
+
+    def wiki_host(netloc):
+        return netloc.lower().replace(".m.wikipedia.org", ".wikipedia.org")
+
+    if wiki_host(parts.netloc) != wiki_host(urllib.parse.urlsplit(page_url).netloc):
+        return None
+    if not parts.path.startswith("/wiki/") or len(parts.path) == len("/wiki/"):
+        return None
+    title = urllib.parse.unquote(parts.path[len("/wiki/"):])
+    return urllib.parse.urlunsplit((parts.scheme, wiki_host(parts.netloc), parts.path, "", parts.fragment)), title
+
+
+# Containers whose lists are page furniture, not section content (navboxes,
+# sister-project boxes, reference lists, category bar).
+NON_CONTENT_CLASSES = {"navbox", "vertical-navbox", "navbox-styles", "sistersitebox",
+                       "metadata", "catlinks", "reflist", "mw-references-wrap"}
+
+
+def _in_non_content(tag, stop):
+    """True if tag, or an ancestor below stop, is a navbox or similar."""
+    for el in [tag, *tag.parents]:
+        if el is None or el is stop:
+            break
+        if el.get("role") == "navigation" or NON_CONTENT_CLASSES.intersection(el.get("class") or []):
+            return True
+    return False
+
+
+def _is_section_boundary(tag):
+    """True if tag starts (or contains) a heading at level 1 or 2."""
+    if tag.name in ("h1", "h2"):
+        return True
+    classes = tag.get("class") or []
+    if "mw-heading1" in classes or "mw-heading2" in classes:
+        return True
+    return tag.find(["h1", "h2"]) is not None
+
+
+def section_lists(heading):
+    """
+    Return the <ul> lists belonging to the level-2 section headed by
+    heading (the <h2>, or an element inside it). Three markups:
+      Parsoid - the heading (or its <div class="mw-heading"> wrapper) is a
+                direct child of its own <section>; take that section's lists.
+      legacy  - the heading is followed by sibling content up to the next
+                level-2 heading; take the lists in those siblings, including
+                lists nested in wrappers such as {{div col}}.
+      mobile  - as legacy, with the content in a sibling <section>.
+    Lists inside navboxes and similar furniture are skipped.
+    """
+    h2 = heading if heading.name == "h2" else heading.find_parent("h2")
+    if h2 is None:
+        return []
+    wrapper = h2.parent
+    if wrapper is not None and wrapper.name == "div" and "mw-heading" in (wrapper.get("class") or []):
+        container = wrapper
+    else:
+        container = h2
+    parent = container.parent
+    if parent is not None and parent.name == "section":
+        uls = parent.find_all("ul")
+    else:
+        uls = []
+        for sib in container.next_siblings:
+            if not isinstance(sib, Tag):
+                continue
+            if _is_section_boundary(sib):
+                break
+            if sib.name == "ul":
+                uls.append(sib)
+            else:
+                uls.extend(sib.find_all("ul"))
+    return [ul for ul in uls if not _in_non_content(ul, parent)]
+
+
 def scrape_links_from_url(url, heading_mappings=None):
     """
     Scrape links from a given URL, organizing them based on section headings.
-    Returns a dictionary of sections and their links.
+    Returns a dictionary of sections and their links, keyed by folder name.
+    If two headings are mapped to the same folder, their links are merged.
     """
     if heading_mappings is None:
         heading_mappings = DEFAULT_HEADING_MAPPINGS
@@ -136,87 +361,71 @@ def scrape_links_from_url(url, heading_mappings=None):
         
         # Process Wikipedia-specific sections if the URL is from Wikipedia
         if "wikipedia.org" in url:
-            # Look for "See also" section
+            # Markup note (patched 2026-11-08): article pages may be served
+            # as Parsoid HTML, where the section id sits on the <h2> itself
+            # (inside <div class="mw-heading">, grouped in a <section>),
+            # content links may be absolute or './Title' hrefs, and redirect
+            # links carry class="mw-redirect". The original code looked for
+            # a parent <h2> of a span, relative en.wikipedia hrefs only, and
+            # rejected any link with a class attribute, so it silently
+            # captured nothing. section_lists() handles Parsoid, legacy and
+            # mobile markup; resolve_wiki_link() resolves every href against
+            # the page's own URL, so other-language wikis work too.
+            def collect(anchors, want_namespace):
+                """Resolve anchors to unique {url, title} links. Keep only
+                namespaced titles ('Category:X') if want_namespace, else
+                only plain article titles."""
+                links, seen = [], set()
+                for a_tag in anchors:
+                    if a_tag is None or not a_tag.has_attr("href"):
+                        continue
+                    resolved = resolve_wiki_link(a_tag["href"], url)
+                    if resolved is None:
+                        continue
+                    full_url, title = resolved
+                    if (":" in title) != want_namespace or full_url in seen:
+                        continue
+                    seen.add(full_url)
+                    links.append({"url": full_url, "title": a_tag.text})
+                return links
+
+            def add_section(key, links):
+                """Add links under the folder key is mapped to, merging if
+                another heading was mapped to the same folder."""
+                if not links:
+                    return
+                folder = heading_mappings[key]
+                if folder in sections:
+                    known = {link["url"] for link in sections[folder]["links"]}
+                    sections[folder]["links"].extend(l for l in links if l["url"] not in known)
+                else:
+                    sections[folder] = {"title": folder, "links": links}
+
+            # "See also": the first link of each list item in the section.
             see_also_heading = soup.find(id="See_also") or soup.find(string="See also")
             if see_also_heading:
-                see_also_section = see_also_heading.find_parent("h2")
-                if see_also_section:
-                    see_also_links = []
-                    current = see_also_section.next_sibling
-                    while current and not (current.name == "h2"):
-                        if current.name == "ul":
-                            for li in current.find_all("li"):
-                                a_tag = li.find("a")
-                                if a_tag and a_tag.has_attr("href") and not a_tag.has_attr("class"):
-                                    href = a_tag["href"]
-                                    if href.startswith("/wiki/") and ":" not in href:
-                                        full_url = "https://en.wikipedia.org" + href
-                                        see_also_links.append({
-                                            "url": full_url,
-                                            "title": a_tag.text
-                                        })
-                        current = current.next_sibling
-                    
-                    if see_also_links:
-                        sections[heading_mappings["See also"]] = {
-                            "title": heading_mappings["See also"],
-                            "links": see_also_links
-                        }
-            
-            # Process categories
+                anchors = [li.find("a") for ul in section_lists(see_also_heading)
+                           for li in ul.find_all("li")]
+                add_section("See also", collect(anchors, want_namespace=False))
+
+            # Categories: the category bar's list items (its leading
+            # "Categories" label link sits outside the list).
             categories_div = soup.find(id="mw-normal-catlinks")
             if categories_div:
-                category_links = []
-                for a_tag in categories_div.find_all("a"):
-                    if a_tag.has_attr("href") and a_tag["href"].startswith("/wiki/Category:"):
-                        full_url = "https://en.wikipedia.org" + a_tag["href"]
-                        category_links.append({
-                            "url": full_url,
-                            "title": a_tag.text
-                        })
-                
-                if category_links:
-                    sections[heading_mappings["Categories"]] = {
-                        "title": heading_mappings["Categories"],
-                        "links": category_links
-                    }
-            
-            # Look for subcategories on category pages
-            if "/wiki/Category:" in url:
-                subcats_div = soup.find(id="mw-subcategories")
-                if subcats_div:
-                    subcat_links = []
-                    for a_tag in subcats_div.find_all("a"):
-                        if a_tag.has_attr("href") and a_tag["href"].startswith("/wiki/Category:"):
-                            full_url = "https://en.wikipedia.org" + a_tag["href"]
-                            subcat_links.append({
-                                "url": full_url,
-                                "title": a_tag.text
-                            })
-                    
-                    if subcat_links:
-                        sections[heading_mappings["Subcategories"]] = {
-                            "title": heading_mappings["Subcategories"],
-                            "links": subcat_links
-                        }
-                
-                # Look for pages in the category
-                pages_div = soup.find(id="mw-pages")
-                if pages_div:
-                    page_links = []
-                    for a_tag in pages_div.find_all("a"):
-                        if a_tag.has_attr("href") and a_tag["href"].startswith("/wiki/") and ":" not in a_tag["href"]:
-                            full_url = "https://en.wikipedia.org" + a_tag["href"]
-                            page_links.append({
-                                "url": full_url,
-                                "title": a_tag.text
-                            })
-                    
-                    if page_links:
-                        sections[heading_mappings["Pages"]] = {
-                            "title": heading_mappings["Pages"],
-                            "links": page_links
-                        }
+                add_section("Categories",
+                            collect(categories_div.select("li a"), want_namespace=True))
+
+            # Category pages: subcategories and member pages. These divs
+            # only exist on category pages, so no URL test is needed (the
+            # namespace name differs by language, e.g. 'Kategorie:').
+            subcats_div = soup.find(id="mw-subcategories")
+            if subcats_div:
+                add_section("Subcategories",
+                            collect(subcats_div.select("li a"), want_namespace=True))
+            pages_div = soup.find(id="mw-pages")
+            if pages_div:
+                add_section("Pages",
+                            collect(pages_div.select("li a"), want_namespace=False))
         
         # For non-Wikipedia pages, just collect all links
         else:
@@ -256,9 +465,9 @@ def scrape_links_from_url(url, heading_mappings=None):
                     "title": "Links",
                     "links": all_links
                 }
-        
+
         return sections
-    
+
     except Exception as e:
         print(f"Error scraping links from {url}: {e}")
         return {"main": {"title": "Error", "links": []}}
@@ -656,6 +865,7 @@ def main():
     parser.add_argument("--favorites-dir", help="Directory to store .url files", default=DEFAULT_FAVORITES_PATH)
     parser.add_argument("--output-dir", help="Directory to save output bookmark file", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--mapping", help="Custom heading mapping in format 'original:mapped,original2:mapped2'")
+    parser.add_argument("--sections", help="Comma-separated section selectors: plain names (main, see-also, categories, subcategories, pages, or a folder name from --mapping), re:<regex>, or fuzzy:<text> (default: all)")
     args = parser.parse_args()
     
     # Set up directories
@@ -674,10 +884,35 @@ def main():
                 heading_mappings[original.strip()] = mapped.strip()
         except:
             print("Warning: Could not parse custom mapping. Using defaults.")
-    
+
+    mapping_errors, mapping_warnings = check_mapping_collisions(heading_mappings)
+    for warning in mapping_warnings:
+        print(f"WARNING: {warning}")
+    if mapping_errors:
+        for error in mapping_errors:
+            print(f"Error: {error}")
+        sys.exit(2)
+
+    try:
+        section_matchers = parse_sections_arg(args.sections, heading_mappings)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(2)
+    if args.sections is not None and not section_matchers:
+        print("Error: --sections did not contain any valid section selector. Nothing to do.")
+        sys.exit(2)
+
     print(f"Scraping links from {args.url}...")
     sections = scrape_links_from_url(args.url, heading_mappings)
-    
+    if section_matchers is not None:
+        found = ", ".join(sections.keys()) if sections else "(none)"
+        sections = filter_sections(sections, heading_mappings, section_matchers)
+        if not sections:
+            print(f"Error: --sections '{args.sections}' matched none of the sections "
+                  f"found on the page ({found}). Nothing exported.")
+            sys.exit(1)
+    print(f"Sections captured: {', '.join(sections.keys()) if sections else '(none)'}")
+
     print(f"Saving links to .url files in {favorites_path}...")
     main_dir, section_dirs = save_to_url_files(sections, favorites_path)
     
